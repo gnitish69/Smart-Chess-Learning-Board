@@ -1,0 +1,768 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Chess LED — Premium (patched)</title>
+  <style>
+    :root {
+      --bg: #050a10;
+      --panel: #0a1420;
+      --text: #e6fbff;
+
+      /* Board Colors */
+      --board-dark: #14213D;   /* Deep Blue */
+      --board-light: #F4F7FB;  /* Soft Off-White */
+
+      /* LED Colors */
+      --led-legal: #2ECC71;    /* Bright Green */
+      --led-illegal: #E74C3C;  /* Red */
+      --led-recent: #9B59B6;   /* Purple */
+      --led-check: #E74C3C;    /* Use urgent red for check (matches illegal) */
+
+      /* Overlay Opacities & Timings */
+      --led-base-opacity: 0.0;
+      --led-active-opacity: 0.60;
+
+      --pulse-fast: 0.80s;
+      --pulse-medium: 1.6s;
+      --strobe-fast: 0.45s;
+    }
+
+    /* Page layout */
+    html, body {
+      height: 100%;
+      margin: 0;
+      font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      overflow: hidden;
+    }
+
+    .wrap {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 20px;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+    }
+
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 20px;
+      opacity: 0;
+      animation: fadeIn 1s ease-out forwards 1s;
+    }
+
+    h1 { margin: 0; color: #fff; font-weight: 300; letter-spacing: 1px; font-size: 24px; }
+
+    .status-panel {
+      display: flex;
+      gap: 15px;
+      background: rgba(255,255,255,0.05);
+      padding: 10px 20px;
+      border-radius: 30px;
+      border: 1px solid rgba(255,255,255,0.1);
+      backdrop-filter: blur(10px);
+    }
+
+    .main { display: flex; gap: 40px; align-items: center; justify-content: center; flex-wrap: wrap; }
+
+    /* chess board grid */
+    .chess-board {
+      display: grid;
+      grid-template-columns: repeat(8, 70px);
+      grid-template-rows: repeat(8, 70px);
+      gap: 0;
+      border-radius: 4px;
+      overflow: hidden;
+      box-shadow: 0 20px 50px rgba(0,0,0,0.5);
+      border: 8px solid #0e1824;
+      position: relative;
+      opacity: 0;
+      transition: opacity 300ms;
+      background: linear-gradient(180deg, rgba(255,255,255,0.01), rgba(0,0,0,0.03));
+    }
+
+    /* square basics */
+    .square {
+      position: relative;
+      width: 70px;
+      height: 70px;
+      cursor: pointer;
+      user-select: none;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: visible;
+    }
+
+    /* Base Color Layer */
+    .square::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      z-index: 0;
+    }
+    .square.light::before { background: var(--board-light); }
+    .square.dark::before  { background: var(--board-dark); }
+
+    /* LED Overlay Layer (NO blend mode — prevents hue-warping) */
+    .square::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      z-index: 1;
+      opacity: 0;
+      transition: opacity 0.15s ease-out, background-color 0.15s, box-shadow 0.15s;
+      mix-blend-mode: normal;
+      pointer-events: none;
+    }
+
+    /* Piece Layer */
+    .piece {
+      position: relative;
+      z-index: 2;
+      font-size: 42px;
+      line-height: 1;
+      transition: transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1);
+      filter: drop-shadow(0 4px 6px rgba(0,0,0,0.3));
+      user-select: none;
+    }
+
+    .piece.white {
+      color: #f0f0f0;
+      text-shadow: 0 2px 0 #ccc;
+    }
+
+    /* Improved black piece contrast so dark-square visibility is preserved */
+    .piece.black {
+      color: #0b1b2b;
+      text-shadow: 0 1px 0 rgba(255,255,255,0.02);
+      filter: drop-shadow(0 1px 0 rgba(0,0,0,0.6));
+    }
+
+    /* --- LED Styles (use centralized vars) --- */
+
+    .led-legal::after {
+      background: var(--led-legal);
+      opacity: var(--led-active-opacity);
+      box-shadow: 0 0 20px rgba(46,204,113,0.45), inset 0 0 10px rgba(46,204,113,0.25);
+      animation: pulse-green var(--pulse-fast) infinite;
+    }
+
+    .led-capture::after {
+      background: linear-gradient(45deg, var(--led-legal), var(--led-illegal));
+      opacity: calc(var(--led-active-opacity) * 1.05);
+      box-shadow: 0 0 26px rgba(46,204,113,0.45), inset 0 0 12px rgba(231,76,60,0.16);
+      animation: pulse-capture 1s infinite;
+    }
+
+    .led-illegal::after {
+      background: var(--led-illegal);
+      opacity: 0.85;
+      box-shadow: 0 0 30px rgba(231,76,60,0.6), inset 0 0 10px rgba(231,76,60,0.2);
+    }
+
+    .led-recent::after {
+      background: var(--led-recent);
+      opacity: calc(var(--led-active-opacity) * 0.9);
+      box-shadow: 0 0 14px rgba(155,89,182,0.35), inset 0 0 6px rgba(155,89,182,0.18);
+      animation: blink-purple var(--pulse-medium) infinite;
+    }
+
+    .led-check::after {
+      background: radial-gradient(circle, #fff 0%, var(--led-check) 60%);
+      opacity: 0.95;
+      animation: strobe-check var(--strobe-fast) infinite;
+      box-shadow: 0 0 22px rgba(231,76,60,0.6);
+    }
+
+    .led-selected::after {
+      background: var(--led-legal);
+      opacity: 0.32;
+      box-shadow: 0 0 10px rgba(46,204,113,0.28);
+    }
+
+    .led-pixel::after {
+      background: #fff;
+      opacity: 0.85;
+      box-shadow: 0 0 10px rgba(255,255,255,0.55);
+    }
+
+    /* Turn highlight (low-priority) */
+    .turn-highlight::after {
+      background: rgba(255,255,255,0.04);
+      opacity: 1;
+      box-shadow: inset 0 0 8px rgba(255,255,255,0.03);
+    }
+
+    /* --- Animations --- */
+
+    @keyframes pulse-green {
+      0% { opacity: 0.3; }
+      50% { opacity: 0.6; }
+      100% { opacity: 0.3; }
+    }
+
+    @keyframes pulse-capture {
+      0% { opacity: 0.5; transform: scale(0.95); }
+      50% { opacity: 0.8; transform: scale(1.0); }
+      100% { opacity: 0.5; transform: scale(0.95); }
+    }
+
+    @keyframes blink-purple {
+      0%, 50% { opacity: 0.6; }
+      51%, 100% { opacity: 0.18; }
+    }
+
+    @keyframes strobe-check {
+      0% { opacity: 0.2; }
+      50% { opacity: 0.95; }
+      100% { opacity: 0.2; }
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; } to { opacity: 1; }
+    }
+
+    @keyframes dropIn {
+      0% { transform: translateY(-50px); opacity: 0; }
+      60% { transform: translateY(10px); opacity: 1; }
+      100% { transform: translateY(0); }
+    }
+
+    /* Controls */
+    .controls { width: 300px; opacity: 0; animation: fadeIn 1s ease-out forwards 1.5s; }
+    .btn {
+      display: block; width: 100%; padding: 12px; margin-bottom: 10px; border-radius: 8px;
+      border: none; background: rgba(255,255,255,0.1); color: #fff; cursor: pointer; font-size: 14px; text-align: left;
+    }
+    .btn:hover { background: rgba(255,255,255,0.2); }
+
+    .log {
+      height: 200px; background: rgba(0,0,0,0.3); border-radius: 8px; padding: 10px;
+      font-family: monospace; font-size: 12px; color: #8fbec8; overflow-y: auto; margin-top: 20px;
+    }
+
+    .diagnostics { display:flex; gap:8px; margin-bottom: 8px; }
+    .diagnostics .btn { padding:8px 10px; font-size:13px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>CHESS <span style="color:var(--led-legal)">PREMIUM</span></h1>
+      <div class="status-panel">
+        <div id="turn-indicator">WHITE</div>
+        <div id="status-indicator">READY</div>
+      </div>
+    </header>
+
+    <div class="main">
+      <div id="chess-board" class="chess-board" role="application" aria-label="Smart Move Chess Board"></div>
+
+      <div class="controls">
+        <div class="diagnostics">
+          <button class="btn" onclick="runStartupSequence()">⚡ Startup</button>
+          <button class="btn" onclick="initBoard()">↺ Reset</button>
+        </div>
+
+        <div class="diagnostics">
+          <button class="btn" onclick="debug_fullWhite()">White Test</button>
+          <button class="btn" onclick="debug_purpleTest()">Purple Test</button>
+          <button class="btn" onclick="debug_indexTest()">Index Map</button>
+        </div>
+
+        <div id="log-panel" class="log"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    /* --- Constants & State --- */
+    const ROWS = 8, COLS = 8;
+    const STATE_IDLE = 0, STATE_HOLDING = 1, STATE_GAME_OVER = 2;
+
+    let pieceBoard = Array(ROWS).fill().map(() => Array(COLS).fill(0));
+    let gameState = STATE_IDLE;
+    let currentTurn = 1; // 1=White, 0=Black
+    let checkState = 0; // 0=None, 1=Check, 2=Checkmate
+    let isAnimating = false;
+
+    // Interaction State
+    let heldPiece = 0, fromR = -1, fromC = -1;
+    let legalMoves = Array(ROWS).fill().map(() => Array(COLS).fill(false));
+
+    // Visual State
+    let ledBuffer = Array(ROWS * COLS).fill(null);
+    let lastMoveR = -1, lastMoveC = -1;
+
+    const pieceSymbols = { 0: "", 1: "♖", 2: "♘", 3: "♗", 4: "♕", 5: "♔", 6: "♙", 9: "♜", 10: "♞", 11: "♝", 12: "♛", 13: "♚", 14: "♟" };
+
+    /* --- 8x8 Font Map (A-Z, space) --- */
+    const font8x8 = {
+      'A': [0x18,0x3C,0x66,0x66,0x7E,0x66,0x66,0x00],
+      'B': [0x7C,0x66,0x66,0x7C,0x66,0x66,0x7C,0x00],
+      'C': [0x3C,0x66,0x60,0x60,0x60,0x66,0x3C,0x00],
+      'D': [0xF8,0x6C,0x66,0x66,0x66,0x6C,0xF8,0x00],
+      'E': [0x7E,0x60,0x60,0x78,0x60,0x60,0x7E,0x00],
+      'H': [0x66,0x66,0x66,0x7E,0x66,0x66,0x66,0x00],
+      'I': [0x3C,0x18,0x18,0x18,0x18,0x18,0x3C,0x00],
+      'K': [0x66,0x6C,0x78,0x70,0x78,0x6C,0x66,0x00],
+      'L': [0x60,0x60,0x60,0x60,0x60,0x60,0x7E,0x00],
+      'M': [0x66,0x7E,0x5A,0x42,0x42,0x42,0x42,0x00],
+      'N': [0x66,0x66,0x76,0x7E,0x6E,0x66,0x66,0x00],
+      'O': [0x3C,0x66,0x66,0x66,0x66,0x66,0x3C,0x00],
+      'P': [0x7C,0x66,0x66,0x7C,0x60,0x60,0x60,0x00],
+      'R': [0x7C,0x66,0x66,0x7C,0x6C,0x66,0x66,0x00],
+      'S': [0x3C,0x66,0x60,0x3C,0x06,0x66,0x3C,0x00],
+      'T': [0x7E,0x18,0x18,0x18,0x18,0x18,0x18,0x00],
+      'W': [0x66,0x66,0x66,0x66,0x5A,0x7E,0x66,0x00],
+      ' ': [0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00]
+    };
+
+    /* --- Helpers --- */
+    function ledIndex(r,c){ return r*8 + c; }
+    function inBounds(r,c){ return r>=0 && r<ROWS && c>=0 && c<COLS; }
+    function isWhite(p){ return p>=1 && p<=6; }
+    function isBlack(p){ return p>=9 && p<=14; }
+    function sameColor(p1,p2){ if(!p1||!p2) return false; return (isWhite(p1)&&isWhite(p2))||(isBlack(p1)&&isBlack(p2)); }
+    function log(msg){ const p = document.getElementById('log-panel'); p.innerHTML += `<div>> ${msg}</div>`; p.scrollTop = p.scrollHeight; }
+
+    /* --- Core Chess Logic --- */
+    function isSquareAttacked(r,c,attackerIsWhite,board){
+      const enemyRook = attackerIsWhite ? 1 : 9;
+      const enemyKnight = attackerIsWhite ? 2 : 10;
+      const enemyBishop = attackerIsWhite ? 3 : 11;
+      const enemyQueen = attackerIsWhite ? 4 : 12;
+      const enemyKing = attackerIsWhite ? 5 : 13;
+      const enemyPawn = attackerIsWhite ? 6 : 14;
+
+      // Knight
+      const drK = [-2,-2,-1,-1,1,1,2,2], dcK = [-1,1,-2,2,-2,2,-1,1];
+      for(let i=0;i<8;i++){ const tr=r+drK[i], tc=c+dcK[i]; if(inBounds(tr,tc) && board[tr][tc]===enemyKnight) return true; }
+
+      // Rook/Queen (orthogonal)
+      const drS=[-1,1,0,0], dcS=[0,0,-1,1];
+      for(let i=0;i<4;i++){
+        for(let d=1;d<8;d++){
+          const tr=r+drS[i]*d, tc=c+dcS[i]*d;
+          if(!inBounds(tr,tc)) break;
+          const p = board[tr][tc];
+          if(p!==0){ if(p===enemyRook || p===enemyQueen) return true; break; }
+        }
+      }
+
+      // Bishop/Queen (diagonal)
+      const drD=[-1,-1,1,1], dcD=[-1,1,-1,1];
+      for(let i=0;i<4;i++){
+        for(let d=1;d<8;d++){
+          const tr=r+drD[i]*d, tc=c+dcD[i]*d;
+          if(!inBounds(tr,tc)) break;
+          const p = board[tr][tc];
+          if(p!==0){ if(p===enemyBishop || p===enemyQueen) return true; break; }
+        }
+      }
+
+      // King (adjacent)
+      for(let dr=-1; dr<=1; dr++){
+        for(let dc=-1; dc<=1; dc++){
+          if(dr===0 && dc===0) continue;
+          const tr=r+dr, tc=c+dc;
+          if(inBounds(tr,tc) && board[tr][tc]===enemyKing) return true;
+        }
+      }
+
+      // Pawn attacks:
+      // Coordinates: row 0 = top (Black side), row 7 = bottom (White side).
+      // White pawns move UP (decreasing row index). A white pawn at (r+1,c±1) attacks (r,c).
+      if(attackerIsWhite){
+        if(inBounds(r+1,c-1) && board[r+1][c-1]===enemyPawn) return true;
+        if(inBounds(r+1,c+1) && board[r+1][c+1]===enemyPawn) return true;
+      } else {
+        if(inBounds(r-1,c-1) && board[r-1][c-1]===enemyPawn) return true;
+        if(inBounds(r-1,c+1) && board[r-1][c+1]===enemyPawn) return true;
+      }
+
+      return false;
+    }
+
+    function isCheck(colorIsWhite, board){
+      const kType = colorIsWhite ? 5 : 13;
+      let kR=-1,kC=-1;
+      for(let r=0;r<ROWS;r++){ for(let c=0;c<COLS;c++){ if(board[r][c]===kType){ kR=r; kC=c; break; } } if(kR!==-1) break; }
+      if(kR===-1) return false;
+      return isSquareAttacked(kR,kC,!colorIsWhite, board);
+    }
+
+    function isMoveLegal(r0,c0,r1,c1,type){
+      // simulate move (basic) — does NOT yet handle castling, en-passant, or promotion choices
+      const savedDest = pieceBoard[r1][c1], savedSrc = pieceBoard[r0][c0];
+      pieceBoard[r1][c1] = type; pieceBoard[r0][c0] = 0;
+      const check = isCheck(isWhite(type), pieceBoard);
+      pieceBoard[r0][c0] = savedSrc; pieceBoard[r1][c1] = savedDest;
+      return !check;
+    }
+
+    function generateLegalMoves(r0,c0){
+      legalMoves = Array(ROWS).fill().map(()=>Array(COLS).fill(false));
+      const type = pieceBoard[r0][c0]; if(!type) return;
+      const baseType = type>8 ? type-8 : type;
+      const colorWhite = isWhite(type);
+
+      function tryAdd(r,c){
+        if(inBounds(r,c)){
+          if(pieceBoard[r][c]===0 || !sameColor(type, pieceBoard[r][c])){
+            if(isMoveLegal(r0,c0,r,c,type)) legalMoves[r][c]=true;
+          }
+        }
+      }
+
+      function slide(dr,dc){
+        for(let i=1;i<8;i++){
+          const r = r0+dr*i, c = c0+dc*i;
+          if(!inBounds(r,c)) break;
+          if(pieceBoard[r][c]===0){
+            if(isMoveLegal(r0,c0,r,c,type)) legalMoves[r][c]=true;
+          } else {
+            if(!sameColor(type, pieceBoard[r][c])){
+              if(isMoveLegal(r0,c0,r,c,type)) legalMoves[r][c]=true;
+            }
+            break;
+          }
+        }
+      }
+
+      if(baseType===1 || baseType===4){ slide(-1,0); slide(1,0); slide(0,-1); slide(0,1); }
+      if(baseType===3 || baseType===4){ slide(-1,-1); slide(-1,1); slide(1,-1); slide(1,1); }
+      if(baseType===2){
+        const moves = [[-2,-1],[-2,1],[-1,-2],[-1,2],[1,-2],[1,2],[2,-1],[2,1]];
+        moves.forEach(([dr,dc]) => tryAdd(r0+dr, c0+dc));
+      }
+      if(baseType===5){
+        for(let dr=-1;dr<=1;dr++) for(let dc=-1;dc<=1;dc++) if(dr||dc) tryAdd(r0+dr, c0+dc);
+      }
+      if(baseType===6){
+        const forward = colorWhite ? -1 : 1;
+        const startRow = colorWhite ? 6 : 1;
+        // Move1
+        if(inBounds(r0+forward, c0) && pieceBoard[r0+forward][c0]===0){
+          if(isMoveLegal(r0,c0,r0+forward,c0,type)) legalMoves[r0+forward][c0]=true;
+          // Move2
+          if(r0===startRow && inBounds(r0+forward*2,c0) && pieceBoard[r0+forward*2][c0]===0){
+            if(isMoveLegal(r0,c0,r0+forward*2,c0,type)) legalMoves[r0+forward*2][c0]=true;
+          }
+        }
+        // Captures
+        if(inBounds(r0+forward,c0-1) && pieceBoard[r0+forward][c0-1]!==0 && !sameColor(type,pieceBoard[r0+forward][c0-1])){
+          if(isMoveLegal(r0,c0,r0+forward,c0-1,type)) legalMoves[r0+forward][c0-1]=true;
+        }
+        if(inBounds(r0+forward,c0+1) && pieceBoard[r0+forward][c0+1]!==0 && !sameColor(type,pieceBoard[r0+forward][c0+1])){
+          if(isMoveLegal(r0,c0,r0+forward,c0+1,type)) legalMoves[r0+forward][c0+1]=true;
+        }
+      }
+    }
+
+    function hasAnyLegalMove(colorIsWhite){
+      for(let r=0;r<ROWS;r++){
+        for(let c=0;c<COLS;c++){
+          const p = pieceBoard[r][c];
+          if(p && isWhite(p)===colorIsWhite){
+            const savedLegal = legalMoves.map(row => [...row]);
+            generateLegalMoves(r,c);
+            let found=false;
+            for(let rr=0; rr<ROWS; rr++) for(let cc=0; cc<COLS; cc++) if(legalMoves[rr][cc]) found=true;
+            legalMoves = savedLegal;
+            if(found) return true;
+          }
+        }
+      }
+      return false;
+    }
+
+    async function checkGameStatus(){
+      const turnIsWhite = (currentTurn === 1);
+      const inCheck = isCheck(turnIsWhite, pieceBoard);
+      const hasMoves = hasAnyLegalMove(turnIsWhite);
+
+      if(inCheck){
+        if(!hasMoves){
+          checkState = 2; log("CHECKMATE!"); document.getElementById('status-indicator').textContent = "CHECKMATE";
+          document.getElementById('status-indicator').style.color = "#E74C3C";
+          gameState = STATE_GAME_OVER; updateLEDs(); render();
+          await scrollText(turnIsWhite ? "BLACK WINS" : "WHITE WINS");
+        } else {
+          checkState = 1; log("CHECK!"); document.getElementById('status-indicator').textContent = "CHECK";
+          document.getElementById('status-indicator').style.color = "#E74C3C";
+        }
+      } else {
+        if(!hasMoves){
+          checkState = 0; log("STALEMATE!"); document.getElementById('status-indicator').textContent = "STALEMATE";
+          gameState = STATE_GAME_OVER; await scrollText("DRAW");
+        } else {
+          checkState = 0; document.getElementById('status-indicator').textContent = "PLAYING";
+          document.getElementById('status-indicator').style.color = "#2ECC71";
+        }
+      }
+      updateLEDs(); render();
+    }
+
+    /* --- Rendering --- */
+    function render(){
+      const boardEl = document.getElementById('chess-board');
+      boardEl.innerHTML = '';
+      boardEl.style.opacity = 1;
+
+      for(let r=0;r<ROWS;r++){
+        for(let c=0;c<COLS;c++){
+          const sq = document.createElement('div');
+          const isDark = (r + c) % 2 === 1;
+          sq.className = `square ${isDark ? 'dark' : 'light'}`;
+          sq.onclick = () => handleClick(r,c);
+
+          // Add LED classes (if present)
+          const idx = ledIndex(r,c);
+          if(ledBuffer[idx]){
+            sq.classList.add(ledBuffer[idx]);
+          }
+
+          // Piece
+          const p = pieceBoard[r][c];
+          if(p !== 0){
+            const pieceEl = document.createElement('div');
+            pieceEl.className = `piece ${isWhite(p) ? 'white' : 'black'}`;
+            pieceEl.textContent = pieceSymbols[p];
+
+            if(isAnimating && isStartupDrop){
+              pieceEl.style.animation = `dropIn 0.6s cubic-bezier(0.34, 1.56, 0.64, 1) ${c*0.05 + r*0.05}s backwards`;
+            }
+
+            if(gameState === STATE_HOLDING && r === fromR && c === fromC){
+              pieceEl.style.transform = 'scale(1.2) translateY(-10px)';
+              pieceEl.style.opacity = '0.7';
+            }
+
+            sq.appendChild(pieceEl);
+          }
+          boardEl.appendChild(sq);
+        }
+      }
+
+      // Update Status
+      document.getElementById('turn-indicator').textContent = currentTurn === 1 ? "WHITE'S TURN" : "BLACK'S TURN";
+      document.getElementById('turn-indicator').style.color = currentTurn === 1 ? "#fff" : "#aaa";
+    }
+
+    /* --- LED System --- */
+    function updateLEDs(){
+      ledBuffer.fill(null);
+
+      if(isAnimating) return; // leave LED buffer control to animation code while animating
+
+      // 1. Last Move (Purple Blink)
+      if(inBounds(lastMoveR, lastMoveC)){
+        ledBuffer[ledIndex(lastMoveR,lastMoveC)] = 'led-recent';
+      }
+
+      // 2. Holding State (source + legal/capture)
+      if(gameState === STATE_HOLDING){
+        if(inBounds(fromR, fromC)) ledBuffer[ledIndex(fromR,fromC)] = 'led-selected';
+        for(let r=0;r<ROWS;r++){
+          for(let c=0;c<COLS;c++){
+            if(legalMoves[r][c]){
+              if(pieceBoard[r][c] !== 0) ledBuffer[ledIndex(r,c)] = 'led-capture';
+              else ledBuffer[ledIndex(r,c)] = 'led-legal';
+            }
+          }
+        }
+      }
+
+      // 3. Check/Checkmate (king strobe) -> Top priority: override if set
+      if(checkState > 0){
+        const kType = currentTurn === 1 ? 5 : 13;
+        for(let r=0;r<ROWS;r++) for(let c=0;c<COLS;c++){
+          if(pieceBoard[r][c] === kType) ledBuffer[ledIndex(r,c)] = 'led-check';
+        }
+      }
+
+      // 4. Turn highlight - only fill when no higher-priority LED already present
+      for(let r=0;r<ROWS;r++){
+        for(let c=0;c<COLS;c++){
+          const p = pieceBoard[r][c];
+          const idx = ledIndex(r,c);
+          if(p && ((currentTurn===1 && isWhite(p)) || (currentTurn===0 && isBlack(p)))){
+            if(!ledBuffer[idx]) ledBuffer[idx] = 'turn-highlight';
+          }
+        }
+      }
+    }
+
+    /* --- Interaction & small helpers --- */
+    function flashSquare(r,c,type){
+      const idx = ledIndex(r,c);
+      const prev = ledBuffer[idx];
+      ledBuffer[idx] = type;
+      render();
+      setTimeout(()=>{ ledBuffer[idx] = prev; updateLEDs(); render(); }, 400);
+    }
+
+    function handleClick(r,c){
+      if(isAnimating || gameState === STATE_GAME_OVER) return;
+
+      if(gameState === STATE_IDLE){
+        const p = pieceBoard[r][c];
+        if(!p) return;
+
+        if((isWhite(p) && currentTurn === 0) || (isBlack(p) && currentTurn === 1)){
+          flashSquare(r,c,'led-illegal'); log("Not your turn"); return;
+        }
+
+        // Lift
+        gameState = STATE_HOLDING;
+        heldPiece = p; fromR = r; fromC = c;
+        generateLegalMoves(r,c);
+        updateLEDs(); render(); log("Piece selected");
+      }
+      else if(gameState === STATE_HOLDING){
+        // Cancel
+        if(r===fromR && c===fromC){
+          gameState = STATE_IDLE; heldPiece = 0; fromR = -1; fromC = -1;
+          updateLEDs(); render(); log("Move cancelled"); return;
+        }
+
+        // Move
+        if(legalMoves[r][c]){
+          pieceBoard[r][c] = heldPiece; pieceBoard[fromR][fromC] = 0;
+          lastMoveR = r; lastMoveC = c;
+          currentTurn = currentTurn === 1 ? 0 : 1;
+          gameState = STATE_IDLE;
+          updateLEDs(); render(); log("Move committed");
+          checkGameStatus();
+        } else {
+          flashSquare(r,c,'led-illegal'); log("Illegal move");
+        }
+      }
+    }
+
+    /* --- Startup Sequence & scrollText --- */
+    let isStartupDrop = false;
+
+    async function runStartupSequence(){
+      if(isAnimating) return;
+      isAnimating = true; isStartupDrop = false;
+      log("Starting sequence...");
+
+      // Board Reveal
+      const board = document.getElementById('chess-board');
+      board.style.opacity = 0;
+      board.style.transition = 'opacity 1s ease-out';
+      setTimeout(()=> board.style.opacity = 1, 100);
+      await new Promise(r => setTimeout(r, 1200));
+
+      // Scroll
+      await scrollText("WELCOME");
+
+      // Piece Drop
+      initBoardData();
+      isStartupDrop = true;
+      render();
+      await new Promise(r => setTimeout(r, 1500));
+
+      isStartupDrop = false;
+      isAnimating = false;
+      updateLEDs();
+      render();
+      log("Ready.");
+    }
+
+    // Improved scrollText with clearer math (char bytes are row-major)
+    async function scrollText(text){
+      const msg = text.toUpperCase();
+      const charWidth = 8, spacing = 1;
+      const totalCols = msg.length * (charWidth + spacing);
+      for(let pos = -8; pos <= totalCols; pos++){
+        ledBuffer.fill(null);
+        for(let i=0;i<msg.length;i++){
+          const bitmap = font8x8[msg[i]] || font8x8[' '];
+          const charColStart = i * (charWidth + spacing) - pos;
+          for(let row=0; row<8; row++){
+            const bits = bitmap[row];
+            for(let col=0; col<charWidth; col++){
+              const bit = (bits >> (7-col)) & 1;
+              if(!bit) continue;
+              const screenC = charColStart + col;
+              if(screenC >= 0 && screenC < 8) ledBuffer[ledIndex(row, screenC)] = 'led-pixel';
+            }
+          }
+        }
+        render();
+        await new Promise(r => setTimeout(r, 80));
+      }
+      ledBuffer.fill(null); render();
+    }
+
+    /* --- Board init / debug --- */
+    function initBoardData(){
+      pieceBoard = Array(ROWS).fill().map(()=>Array(COLS).fill(0));
+      // Row 0 (Top) -> Black Pieces (9..14)
+      pieceBoard[0] = [9,10,11,12,13,11,10,9];
+      pieceBoard[1] = Array(8).fill(14);
+      // Row 7 (Bottom) -> White Pieces (1..6)
+      pieceBoard[6] = Array(8).fill(6);
+      pieceBoard[7] = [1,2,3,4,5,3,2,1];
+
+      currentTurn = 1; gameState = STATE_IDLE; checkState = 0;
+      lastMoveR = -1; lastMoveC = -1;
+    }
+
+    function initBoard(){
+      initBoardData(); updateLEDs(); render(); log("Board reset");
+    }
+
+    // Debug helpers: patterns to validate color/mapping
+    function debug_fullWhite(){
+      isAnimating = true;
+      ledBuffer.fill('led-pixel'); // white full board (uses led-pixel)
+      render();
+      setTimeout(()=>{ isAnimating=false; ledBuffer.fill(null); updateLEDs(); render(); }, 1200);
+    }
+
+    function debug_purpleTest(){
+      isAnimating = true;
+      ledBuffer.fill('led-recent');
+      render();
+      setTimeout(()=>{ isAnimating=false; ledBuffer.fill(null); updateLEDs(); render(); }, 1200);
+    }
+
+    function debug_indexTest(){
+      isAnimating = true;
+      ledBuffer.fill(null);
+      for(let r=0;r<ROWS;r++){
+        for(let c=0;c<COLS;c++){
+          const i = ledIndex(r,c);
+          // Map index parity to two colors so you can confirm wiring visually
+          ledBuffer[i] = (i % 3 === 0) ? 'led-legal' : (i % 3 === 1) ? 'led-recent' : 'led-capture';
+        }
+      }
+      render();
+      setTimeout(()=>{ isAnimating=false; ledBuffer.fill(null); updateLEDs(); render(); }, 1600);
+    }
+
+    // Debug char dump to console for font checking
+    function debugChar(char){
+      const b = font8x8[char] || font8x8[' '];
+      console.log(char, b.map(x => x.toString(2).padStart(8,'0')).join('\n'));
+    }
+
+    // TODO: castling, en-passant, promotion UI, move-history, repetition rules
+
+    // Start
+    initBoard();
+  </script>
+</body>
+</html>
